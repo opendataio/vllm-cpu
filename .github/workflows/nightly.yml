@@ -1,0 +1,133 @@
+name: Nightly build & publish vllm-cpu
+
+# Builds CPU-only vLLM wheels for both Linux (ubuntu-22.04) and macOS
+# (macos-latest), uploads them to PyPI as `vllm-cpu-nightly`, and re-runs
+# every day so consumers can `pip install --upgrade vllm-cpu-nightly`.
+#
+# Triggers:
+#   * schedule  -> every day at 06:00 UTC (~14:00 Beijing time).
+#   * manual    -> Actions tab > Run workflow,
+#                  or `gh workflow run nightly.yml -R opendataio/vllm-cpu`.
+#
+# Required repository secret:
+#   PYPI_TOKEN  -> a PyPI API token that owns the `vllm-cpu-nightly`
+#                  project (or has upload permission to it).
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      vllm_git_ref:
+        description: "vLLM git ref (branch / tag / sha). Default: main"
+        required: false
+        default: "main"
+      skip_upload:
+        description: "Build only, do not upload to PyPI (1 = skip)"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-ubuntu:
+    name: Build & publish (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Stage PyPI token
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          if [[ -z "${PYPI_TOKEN}" ]]; then
+            echo "::error::PYPI_TOKEN secret is not configured"
+            exit 1
+          fi
+          umask 077 && : > "${RUNNER_TEMP}/pypi_apikey"
+          printf '%s' "${PYPI_TOKEN}" > "${RUNNER_TEMP}/pypi_apikey"
+
+      - name: Run build & publish script
+        env:
+          PYPI_TOKEN_FILE: ${{ runner.temp }}/pypi_apikey
+          VLLM_GIT_REF: ${{ github.event.inputs.vllm_git_ref || 'main' }}
+          SKIP_UPLOAD: ${{ github.event.inputs.skip_upload || '0' }}
+          # The script's default WORK_DIR (/data/...) does not exist on
+          # GitHub-hosted runners; redirect to the runner's temp dir.
+          WORK_DIR: ${{ runner.temp }}/vllm-cpu-nightly-build
+        run: |
+          chmod +x scripts/build_and_publish_vllm_cpu_nightly.sh
+          bash scripts/build_and_publish_vllm_cpu_nightly.sh
+
+      - name: Upload built wheels (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vllm-cpu-nightly-linux-wheels
+          path: ${{ runner.temp }}/vllm-cpu-nightly-build/dist/*.whl
+          if-no-files-found: ignore
+          retention-days: 14
+
+  build-macos:
+    name: Build & publish (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        id: setup-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install rustup (cargo)
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain stable -q
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Stage PyPI token
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          if [[ -z "${PYPI_TOKEN}" ]]; then
+            echo "::error::PYPI_TOKEN secret is not configured"
+            exit 1
+          fi
+          umask 077 && : > "${RUNNER_TEMP}/pypi_apikey"
+          printf '%s' "${PYPI_TOKEN}" > "${RUNNER_TEMP}/pypi_apikey"
+
+      - name: Run build & publish script
+        env:
+          PYPI_TOKEN_FILE: ${{ runner.temp }}/pypi_apikey
+          VLLM_GIT_REF: ${{ github.event.inputs.vllm_git_ref || 'main' }}
+          SKIP_UPLOAD: ${{ github.event.inputs.skip_upload || '0' }}
+          WORK_DIR: ${{ runner.temp }}/vllm-cpu-nightly-build-macos
+          PYTHON_BIN: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          chmod +x scripts/build_and_publish_vllm_cpu_nightly_macos.sh
+          bash scripts/build_and_publish_vllm_cpu_nightly_macos.sh
+
+      - name: Upload built wheels (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vllm-cpu-nightly-macos-wheels
+          path: ${{ runner.temp }}/vllm-cpu-nightly-build-macos/dist/*.whl
+          if-no-files-found: ignore
+          retention-days: 14
